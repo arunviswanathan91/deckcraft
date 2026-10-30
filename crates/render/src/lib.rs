@@ -63,6 +63,7 @@ pub use transition::{SlideParts, composite_transition, render_transition};
 mod geometry;
 mod opts;
 mod raster;
+mod region;
 mod renderer;
 mod slide;
 mod stroke;
@@ -74,6 +75,7 @@ pub(crate) use geometry::{color, scale_of};
 use opts::SlideFields;
 pub use opts::{ParaState, RenderOpts, ShapeState};
 pub use raster::{Image, MAX_SIDE, dpi_for_scale, image_dpi};
+pub use region::render_region;
 #[cfg(test)]
 use renderer::RENDERER;
 pub use renderer::Renderer;

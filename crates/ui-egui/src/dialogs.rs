@@ -54,6 +54,7 @@ fn title(id: &str) -> &'static str {
         "gridOptions" => "Grid Options",
         "columns" => "Columns",
         "export" => "Export",
+        "figures" => "Export Slides as Figures",
         "symbol" => "Symbol",
         "photoAlbum" => "Photo Album",
         "replaceFonts" => "Replace Font",
@@ -100,6 +101,7 @@ pub fn show(app: &mut SlideApp, ctx: &egui::Context) {
         ui.set_min_width(match d.id.as_str() {
             "themeColors" => 700.0,
             "themeFonts" => 400.0,
+            "figures" => 520.0,
             _ => 340.0,
         });
         if d.id == "themeColors" {
@@ -209,6 +211,7 @@ mod columns;
 mod date_time;
 mod equation;
 mod export;
+mod figures;
 mod find;
 mod font;
 mod grid_options;

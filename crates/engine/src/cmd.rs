@@ -7,6 +7,7 @@ pub mod background;
 pub mod compress;
 pub mod design;
 pub mod edit;
+pub mod figure;
 pub mod file;
 pub mod find;
 pub mod format;
@@ -163,6 +164,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
     SPECS.get_or_init(|| {
         let mut v = Vec::new();
         v.extend(file::specs());
+        v.extend(figure::specs());
         v.extend(edit::specs());
         v.extend(slide::specs());
         v.extend(reuse::specs());

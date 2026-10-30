@@ -139,6 +139,8 @@ fn every_writing_command_is_refused_outside_the_write_root() {
         let (error, text) = run(&mut server, command, json!({"path": outside("z.deckcraft")}));
         assert!(error && text.contains("outside the write root"), "{command}: {text}");
     }
+    let (error, text) = run(&mut server, "file.exportSlides", json!({"dir": s(&base.join("outside")), "format": "tiff", "dpi": 72}));
+    assert!(error && text.contains("outside the write root"), "file.exportSlides: {text}");
     // A sibling folder with the same prefix, and `..` out of the root.
     refused(&mut server, "save_presentation", json!({"path": s(&base.join("out2/x.deckcraft"))}), "outside the write root");
     let sep = std::path::MAIN_SEPARATOR;
@@ -161,7 +163,10 @@ fn every_writing_command_is_refused_outside_the_write_root() {
     ok(&mut server, "export", json!({"path": inside("x.pdf")}));
     ok(&mut server, "export", json!({"path": inside("all.png"), "all": true}));
     ok(&mut server, "call_app", json!({"method": "ui.render", "params": {"path": inside("r.png")}}));
-    for f in ["x.deckcraft", "x.pptx", "x.pdf", "all1.png", "all2.png", "r.png"] {
+    let (error, text) =
+        run(&mut server, "file.exportSlides", json!({"dir": s(&base.join("out")), "name": "fig", "format": "tiff", "dpi": 72, "slides": "all"}));
+    assert!(!error, "file.exportSlides: {text}");
+    for f in ["x.deckcraft", "x.pptx", "x.pdf", "all1.png", "all2.png", "r.png", "fig_slide01.tif", "fig_slide02.tif"] {
         assert!(base.join("out").join(f).exists(), "{f}");
     }
     let temporaries: Vec<_> = std::fs::read_dir(base.join("out"))

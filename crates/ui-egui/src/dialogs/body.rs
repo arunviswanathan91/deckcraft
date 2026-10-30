@@ -44,6 +44,7 @@ pub(super) fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
         "paragraph" => paragraph_dialog(app, ui, d),
         "tabs" => tabs_dialog(app, ui, d),
         "export" => dlg_export(app, ui, d),
+        "figures" => super::figures::figures_dialog(app, ui, d),
         "replaceFonts" => dlg_replace_fonts(app, ui, d),
         "symbol" => dlg_symbol(app, ui, d),
         "equation" => dlg_equation(app, ui, d),
@@ -706,6 +707,11 @@ fn dlg_rename_section(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
 
 fn dlg_export(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     ui.label("Export the presentation as:");
+    if ui.button("Each slide as its own figure (TIFF, PNG, JPEG, SVG, PDF; DPI, crop)…").clicked() {
+        *d = Dialog::new("figures");
+        return false;
+    }
+    ui.add_space(4.0);
     let fmt = d.get("fmt", "pdf");
     for (l, f) in [
         ("PDF document (.pdf)", "pdf"),

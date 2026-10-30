@@ -79,6 +79,105 @@ impl Image {
         }
         buf
     }
+    /// This image with its pixels unpremultiplied in place (no second copy: publication-size
+    /// figures run to hundreds of megabytes). `opaque` drops the transparency by compositing onto
+    /// white, for formats without an alpha channel.
+    fn into_straight(mut self, opaque: bool) -> Image {
+        for px in self.pixels.as_chunks_mut::<4>().0 {
+            let a = u32::from(px[3]);
+            if opaque {
+                // Premultiplied over white: the colour plus the white that shows through.
+                let k = 255 - px[3];
+                for c in px.iter_mut().take(3) {
+                    *c = c.saturating_add(k);
+                }
+                px[3] = 255;
+            } else if a != 0 && a != 255 {
+                for c in px.iter_mut().take(3) {
+                    *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+                }
+            }
+        }
+        self
+    }
+
+    /// [`Image::to_png_at`] consuming the image; `opaque` flattens it onto white (an alpha channel
+    /// is kept otherwise).
+    pub fn into_png_at(self, dpi: f64, opaque: bool) -> Vec<u8> {
+        let img = self.into_straight(opaque);
+        let (w, h) = (img.width, img.height);
+        let mut buf = Vec::new();
+        let res = if opaque {
+            let rgb: Vec<u8> = img.pixels.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+            drop(img);
+            match image::RgbImage::from_raw(w, h, rgb) {
+                Some(i) => i.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png),
+                None => return Vec::new(),
+            }
+        } else {
+            match image::RgbaImage::from_raw(w, h, img.pixels) {
+                Some(i) => i.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png),
+                None => return Vec::new(),
+            }
+        };
+        if let Err(e) = res {
+            log::error!("PNG encode: {e}");
+            return Vec::new();
+        }
+        images::stamp_png_dpi(&buf, dpi)
+    }
+
+    /// [`Image::to_jpeg_at`] consuming the image (transparency flattened onto white).
+    pub fn into_jpeg_at(self, quality: u8, dpi: Option<f64>) -> Vec<u8> {
+        let img = self.into_straight(true);
+        let (w, h) = (img.width, img.height);
+        let rgb: Vec<u8> = img.pixels.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+        drop(img);
+        let Some(img) = image::RgbImage::from_raw(w, h, rgb) else { return Vec::new() };
+        let mut buf = Vec::new();
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality.clamp(1, 100));
+        if let Some(d) = dpi.and_then(dpi_u16) {
+            enc.set_pixel_density(image::codecs::jpeg::PixelDensity::dpi(d));
+        }
+        if let Err(e) = img.write_with_encoder(enc) {
+            log::error!("JPEG encode: {e}");
+            return Vec::new();
+        }
+        buf
+    }
+
+    /// A TIFF of this image with LZW compression, recording `dpi` (inch units) in its
+    /// resolution tags, the way journals ask for figures. RGB, or RGBA when `opaque` is false.
+    pub fn into_tiff_at(self, dpi: f64, opaque: bool) -> Vec<u8> {
+        use tiff::encoder::{Compression, Rational, TiffEncoder, colortype};
+        use tiff::tags::ResolutionUnit;
+        let img = self.into_straight(opaque);
+        let (w, h) = (img.width, img.height);
+        let res = Rational { n: dpi.clamp(1.0, 100_000.0).round() as u32, d: 1 };
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let done = (|| -> Result<(), tiff::TiffError> {
+            let mut enc = TiffEncoder::new(&mut buf)?.with_compression(Compression::Lzw);
+            if opaque {
+                let rgb: Vec<u8> = img.pixels.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+                drop(img);
+                let mut im = enc.new_image::<colortype::RGB8>(w, h)?;
+                im.resolution(ResolutionUnit::Inch, res);
+                im.write_data(&rgb)
+            } else {
+                let mut im = enc.new_image::<colortype::RGBA8>(w, h)?;
+                im.resolution(ResolutionUnit::Inch, res);
+                im.write_data(&img.pixels)
+            }
+        })();
+        match done {
+            Ok(()) => buf.into_inner(),
+            Err(e) => {
+                log::error!("TIFF encode: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     /// Pixel at (x, y) as straight RGBA.
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let i = (y as usize * self.width as usize + x as usize) * 4;

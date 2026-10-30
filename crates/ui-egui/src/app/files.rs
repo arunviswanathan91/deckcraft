@@ -179,6 +179,10 @@ impl SlideApp {
 
     /// Hands `bytes` to the browser as a download (web); false (with the reason in the status
     /// bar) when there are no bytes or no way to download.
+    pub(crate) fn download_file(&mut self, name: &str, bytes: deckcraft_engine::Result<Vec<u8>>) -> bool {
+        self.download(name, bytes)
+    }
+
     fn download(&mut self, name: &str, bytes: deckcraft_engine::Result<Vec<u8>>) -> bool {
         match (bytes, self.services.download.as_mut()) {
             (Ok(b), Some(dl)) => {

@@ -178,7 +178,7 @@ fn export_inner(pres: &Presentation, opts: &PdfOptions) -> Result<Vec<u8>> {
     let pdf = writer.document_mut();
 
     let (sw, sh) = (pres.slide_size.width.max(1.0), pres.slide_size.height.max(1.0));
-    let mut ex = Exporter { pres, opts, fonts: HashMap::new(), backdrops: Backdrops::default() };
+    let mut ex = Exporter { pres, opts, fonts: HashMap::new(), backdrops: Backdrops::default(), keep: None };
     // Page plan: per page, the slides on it with their boxes (page points).
     let pages = plan_pages(pres, opts, &slides, sw, sh);
     // Bookmarks and slide → page lookup for internal links.
@@ -224,6 +224,66 @@ fn export_inner(pres: &Presentation, opts: &PdfOptions) -> Result<Vec<u8>> {
         }
         page.finish();
     }
+    writer.finish().map_err(Into::into)
+}
+
+/// One slide as a figure: its own PDF, one page exactly the size of `crop` (slide points; the whole
+/// slide when `None`), the artwork drawn at `dpi` (publication figures: 300, 600, 1200 and more)
+/// with a selectable text layer of the text inside the crop. A crop past the slide is cut to it.
+#[derive(Clone, Debug)]
+pub struct FigureOptions {
+    pub dpi: f64,
+    pub crop: Option<Rect>,
+    pub text_layer: bool,
+    /// Most pixels the artwork may have.
+    pub max_pixels: u64,
+}
+
+/// [`FigureOptions`] export of slide `index` as PDF bytes.
+pub fn export_figure(pres: &Presentation, index: usize, opts: &FigureOptions) -> Result<Vec<u8>> {
+    write::guard(|| figure_inner(pres, index, opts))
+}
+
+fn figure_inner(pres: &Presentation, index: usize, fo: &FigureOptions) -> Result<Vec<u8>> {
+    let slide = pres.slides.get(index).ok_or(PdfError::NoPages)?;
+    let full = Rect::new(0.0, 0.0, pres.slide_size.width.max(1.0), pres.slide_size.height.max(1.0));
+    let region = fo.crop.map_or(full, |c| c.intersect(full));
+    if !(region.width() > 0.0 && region.height() > 0.0) || !fo.dpi.is_finite() || fo.dpi <= 0.0 {
+        return Err(PdfError::NoPages);
+    }
+    let img = deckcraft_render::render_region(pres, index, region, fo.dpi / 72.0, false, fo.max_pixels)
+        .ok_or_else(|| PdfError::Write("the figure is too large to draw at this resolution".into()))?;
+    let (w, h) = (img.width, img.height);
+    let mut rgba = img.pixels;
+    opaque(&mut rgba);
+    let title = slide.title();
+    let title = title.lines().next().unwrap_or("").trim().to_string();
+    let metadata = Metadata {
+        creator: "DeckCraft".into(),
+        producer: "DeckCraft".into(),
+        title: (!title.is_empty()).then_some(title),
+        authors: if pres.props.author.trim().is_empty() { Vec::new() } else { vec![pres.props.author.clone()] },
+        ..Default::default()
+    };
+    let mut writer = Writer::new(Default::default(), metadata);
+    let pdf = writer.document_mut();
+    let (pw, ph) = (region.width(), region.height());
+    let size = Size::from_wh(pw as f32, ph as f32).ok_or(PdfError::NoPages)?;
+    let popts = PdfOptions::default();
+    let mut ex = Exporter { pres, opts: &popts, fonts: HashMap::new(), backdrops: Backdrops::default(), keep: Some(Rect::new(0.0, 0.0, pw, ph)) };
+    let mut page = pdf.start_page_with(PageSettings::new(size));
+    {
+        let mut s = page.surface();
+        s.draw_image(Image::from_rgba8(rgba, w, h), size);
+        if fo.text_layer {
+            let view = Affine::translate((-region.x0, -region.y0));
+            for pt in deckcraft_render::place_slide(pres, index).texts {
+                ex.text_layer(&mut s, &pt, view, false)?;
+            }
+        }
+        s.finish();
+    }
+    page.finish();
     writer.finish().map_err(Into::into)
 }
 
@@ -392,6 +452,9 @@ struct Exporter<'a> {
     opts: &'a PdfOptions,
     fonts: HashMap<u32, Font>,
     backdrops: Backdrops,
+    /// Page rectangle the text layer is limited to (a cropped figure): runs starting outside it
+    /// are left out, so cropped-away text can't be selected or copied.
+    keep: Option<Rect>,
 }
 
 fn tf(a: Affine) -> Transform {
@@ -573,6 +636,12 @@ impl Exporter<'_> {
                 .collect();
             if text.trim().is_empty() {
                 continue;
+            }
+            if let Some(keep) = self.keep {
+                let o = view * pt.transform * kurbo::Point::new(run.glyphs[0].1, run.glyphs[0].2);
+                if !(o.x >= keep.x0 && o.x <= keep.x1 && o.y >= keep.y0 && o.y <= keep.y1) {
+                    continue;
+                }
             }
             let font = self.font(&run.face)?;
             let n = run.glyphs.len();

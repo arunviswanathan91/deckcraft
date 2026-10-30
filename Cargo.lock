@@ -1065,10 +1065,12 @@ dependencies = [
  "i_overlay",
  "image",
  "js-sys",
+ "kurbo",
  "log",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tiff",
  "zip 3.0.0",
 ]
 
@@ -1241,6 +1243,7 @@ dependencies = [
  "kurbo",
  "log",
  "skrifa 0.47.0",
+ "tiff",
  "vello_common",
  "vello_cpu",
 ]

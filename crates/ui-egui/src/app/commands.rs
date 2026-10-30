@@ -233,6 +233,7 @@ impl SlideApp {
             "app.insertVideoDialog" => self.pick_and_insert("video", "insert.video"),
             "app.saveAsDialog" => self.save_as_dialog("deckcraft"),
             "app.exportDialog" => self.dialog = Some(dialogs::Dialog::new("export")),
+            "app.figuresDialog" => self.dialog = Some(dialogs::Dialog::new("figures")),
             "app.pasteSpecial" => self.dialog = Some(dialogs::Dialog::new("pasteSpecial")),
             "app.browseThemeDialog" => {
                 if self.session.active().is_none() {
