@@ -293,6 +293,7 @@ pub(super) fn export(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage) {
                 (ExportTask::Pdf, Icon::File, "Create PDF Document"),
                 (ExportTask::Handouts, Icon::Notes, "Create Handouts"),
                 (ExportTask::FileType, Icon::Export, "Change File Type"),
+                (ExportTask::Figures, Icon::Export, "Export Slides as Figures"),
             ] {
                 if place_row(ui, icon, label, bs.export == task, 244.0).clicked() {
                     bs.export = task;
@@ -334,6 +335,21 @@ pub(super) fn export(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage) {
                     ui.add_space(10.0);
                     if square_button(ui, Icon::Notes, "Create Handouts", true).clicked() {
                         app.export_as("pdf", json!({"layout": "handouts", "perPage": bs.handouts_per_page}));
+                    }
+                }
+                ExportTask::Figures => {
+                    ui.label(RichText::new("Export Slides as Figures").font(theme::font(16.0)).color(t.text));
+                    bullets(
+                        ui,
+                        &[
+                            "Each slide is its own TIFF, PNG, JPEG, SVG or PDF file",
+                            "Set the resolution (300, 600, 1200 dpi or more) for every slide",
+                            "Crop a slide and export only that area",
+                        ],
+                    );
+                    ui.add_space(10.0);
+                    if square_button(ui, Icon::Export, "Export Slides as Figures…", true).clicked() {
+                        let _ = app.run("app.figuresDialog", json!({}));
                     }
                 }
                 ExportTask::FileType => {

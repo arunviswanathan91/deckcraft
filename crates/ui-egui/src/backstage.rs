@@ -157,6 +157,7 @@ pub enum ExportTask {
     Pdf,
     Handouts,
     FileType,
+    Figures,
 }
 
 /// The File tab's state while it is open.
