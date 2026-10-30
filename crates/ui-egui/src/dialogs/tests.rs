@@ -287,33 +287,36 @@ fn the_open_dialog_reads_the_caret_word_and_the_shape_click() {
     assert_eq!(seed, HyperlinkSeed::blank(), "a caret at the end of the word inserts a new link");
 }
 
-/// Export Slides as Figures…: each chosen slide is its own file at the resolution in its row, the
-/// row's resolution and crop are remembered with the slide, and a bad row is explained, not run.
-#[test]
-fn figures_dialog_writes_one_file_per_slide_with_its_own_dpi_and_crop() {
+fn figures_harness(picked: String) -> egui_kittest::Harness<'static, crate::SlideApp> {
     use egui::vec2;
-    use egui_kittest::kittest::Queryable as _;
-    use serde_json::json;
-
-    use crate::SlideApp;
-    let dir = std::env::temp_dir().join(format!("deckcraft-ui-figures-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let picked = dir.join("Paper.tif").to_string_lossy().to_string();
     let services = crate::Services { pick_save: Some(Box::new(move |_: &str| Some(picked.clone()))), ..Default::default() };
     let mut harness = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
-        |ui, app: &mut SlideApp| {
+        |ui, app: &mut crate::SlideApp| {
             app.logic(ui.ctx());
             app.ui(ui);
         },
-        SlideApp::new(deckcraft_engine::Session::with_new(), services),
+        crate::SlideApp::new(deckcraft_engine::Session::with_new(), services),
     );
     harness.run_steps(2);
+    harness
+}
+
+/// Crop Set saves each slide's crop and resolution with the slides in one undo step; Export Slides
+/// as Figures then writes one file per slide, the cropped ones at the size of the crop, and shows
+/// a progress bar while it goes.
+#[test]
+fn crop_set_then_export_writes_cropped_figures_with_progress() {
+    use egui_kittest::kittest::Queryable as _;
+    use serde_json::json;
+
+    let dir = std::env::temp_dir().join(format!("deckcraft-ui-figures-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut harness = figures_harness(dir.join("Paper.tif").to_string_lossy().to_string());
     harness.state_mut().session.execute("slide.new", &json!({})).unwrap();
-    harness.state_mut().run("app.figuresDialog", json!({})).unwrap();
-    harness.run_steps(2);
-    assert_eq!(harness.state().dialog.as_ref().map(|d| d.id.as_str()), Some("figures"));
-    harness.get_by_label("All slides").click_accesskit();
-    harness.run_steps(2);
+
+    harness.state_mut().run("app.cropSetDialog", json!({})).unwrap();
+    harness.run_steps(3);
+    assert_eq!(harness.state().dialog.as_ref().map(|d| d.id.as_str()), Some("cropSet"));
     {
         let d = harness.state_mut().dialog.as_mut().unwrap();
         d.fields.insert("dpi1".into(), "600".into());
@@ -325,34 +328,62 @@ fn figures_dialog_writes_one_file_per_slide_with_its_own_dpi_and_crop() {
     harness.key_press(egui::Key::Enter);
     harness.run_steps(2);
     assert!(harness.state().dialog.is_none(), "{:?}", harness.state().status);
+    let saved = deckcraft_engine::cmd::figure::settings_of(&harness.state().session.active().unwrap().doc.slides[1]);
+    assert_eq!(saved.dpi, Some(600.0));
+    assert_eq!(saved.crop.map(|c| (c.x0, c.y0, c.width(), c.height())), Some((72.0, 72.0, 288.0, 144.0)));
+    harness.state_mut().session.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(deckcraft_engine::cmd::figure::settings_of(&harness.state().session.active().unwrap().doc.slides[1]), Default::default());
+    harness.state_mut().session.execute("edit.redo", &json!({})).unwrap();
+
+    harness.state_mut().run("app.figuresDialog", json!({})).unwrap();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("1 of 2 slides have a crop").is_some());
+    harness.get_by_label("All slides").click_accesskit();
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    let job = harness.state().dialog.as_ref().and_then(|d| d.job.clone());
+    assert!(job.is_some_and(|j| j.plans.len() == 2), "the export is under way, not finished at once");
+    for _ in 0..40 {
+        if harness.state().dialog.is_none() {
+            break;
+        }
+        harness.run_steps(1);
+    }
+    assert!(harness.state().dialog.is_none(), "{:?}", harness.state().status);
+    assert!(harness.state().status.as_ref().is_some_and(|s| s.0.contains("Exported 2 figures")), "{:?}", harness.state().status);
     let one = deckcraft_render::decode_image(&std::fs::read(dir.join("Paper_slide01.tif")).unwrap()).unwrap();
     assert_eq!((one.width(), one.height()), (4000, 2250), "13.33 × 7.5 in at the default 300 dpi");
     let two = deckcraft_render::decode_image(&std::fs::read(dir.join("Paper_slide02.tif")).unwrap()).unwrap();
-    assert_eq!((two.width(), two.height()), (2400, 1200), "slide 2: 4 × 2 in at 600 dpi");
-    let s = harness.state().session.active().unwrap();
-    let saved = deckcraft_engine::cmd::figure::settings_of(&s.doc.slides[1]);
-    assert_eq!(saved.dpi, Some(600.0));
-    assert_eq!(saved.crop.map(|c| (c.x0, c.y0, c.width(), c.height())), Some((72.0, 72.0, 288.0, 144.0)));
-    assert_eq!(deckcraft_engine::cmd::figure::settings_of(&s.doc.slides[0]), Default::default());
+    assert_eq!((two.width(), two.height()), (2400, 1200), "the crop, 4 × 2 in, at its own 600 dpi: not the whole slide");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn figures_request_reports_incomplete_crops_and_bad_resolutions() {
+fn figures_request_and_crop_set_entries_report_bad_input() {
     use super::{Dialog, figures::request};
     let mut d = Dialog::new("figures");
-    d.fields.insert("fcrop".into(), "1".into());
-    d.fields.insert("cl".into(), "1".into());
-    assert!(request(&d, 3, 0).is_err_and(|e| e.contains("Left, Top, Width and Height")));
-    d.fields.clear();
     d.fields.insert("fslides".into(), "range".into());
     d.fields.insert("frange".into(), "2-9".into());
     assert!(request(&d, 3, 0).is_err());
     d.fields.insert("frange".into(), "2-3".into());
-    d.fields.insert("dpi2".into(), "99999".into());
-    assert!(request(&d, 3, 0).is_err_and(|e| e.contains("Slide 3")));
-    d.fields.insert("dpi2".into(), "1200".into());
+    d.fields.insert("fdpi".into(), "custom".into());
+    d.fields.insert("fdpiCustom".into(), "99999".into());
+    assert!(request(&d, 3, 0).is_err_and(|e| e.contains("Resolution")));
+    d.fields.insert("fdpiCustom".into(), "1200".into());
     let r = request(&d, 3, 0).unwrap();
-    assert_eq!(r.params["slides"], serde_json::json!([1, 2]));
-    assert_eq!(r.params["overrides"][1]["dpi"], 1200.0);
+    assert_eq!(r["slides"], serde_json::json!([1, 2]));
+    assert_eq!(r["dpi"], 1200.0);
+    assert_eq!(r["useSlideSettings"], true);
+
+    let mut c = Dialog::new("cropSet");
+    c.fields.insert("c0l".into(), "1".into());
+    assert!(super::crop_set::entries(&c, 2).is_err_and(|e| e.contains("Slide 1")));
+    c.fields.clear();
+    c.fields.insert("dpi1".into(), "5".into());
+    assert!(super::crop_set::entries(&c, 2).is_err_and(|e| e.contains("Slide 2")));
+    c.fields.insert("dpi1".into(), "600".into());
+    let e = super::crop_set::entries(&c, 2).unwrap();
+    assert_eq!(e[1]["dpi"], 600.0);
+    assert!(e[0]["crop"].is_null());
 }

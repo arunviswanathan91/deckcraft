@@ -8,6 +8,16 @@ use serde_json::{Value, json};
 use crate::SlideApp;
 use crate::theme::{self, Tokens};
 
+/// A slide's picture on the GPU (the slide's index with it).
+#[derive(Clone)]
+pub struct SlideTexture(pub usize, pub egui::TextureHandle);
+
+impl std::fmt::Debug for SlideTexture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SlideTexture({})", self.0)
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Dialog {
     pub id: String,
@@ -15,11 +25,17 @@ pub struct Dialog {
     /// Field values while the dialog is open.
     #[serde(skip)]
     pub fields: std::collections::HashMap<String, String>,
+    /// Slide figures being exported, one a frame (Export Slides as Figures).
+    #[serde(skip)]
+    pub job: Option<figures::Job>,
+    /// The slide picture a dialog shows (Crop Set) and the slide it is of.
+    #[serde(skip)]
+    pub texture: Option<SlideTexture>,
 }
 
 impl Dialog {
     pub fn new(id: &str) -> Self {
-        Dialog { id: id.into(), params: Value::Null, fields: Default::default() }
+        Dialog { id: id.into(), params: Value::Null, fields: Default::default(), job: None, texture: None }
     }
     pub fn modal(&self) -> bool {
         true
@@ -55,6 +71,7 @@ fn title(id: &str) -> &'static str {
         "columns" => "Columns",
         "export" => "Export",
         "figures" => "Export Slides as Figures",
+        "cropSet" => "Crop Set",
         "symbol" => "Symbol",
         "photoAlbum" => "Photo Album",
         "replaceFonts" => "Replace Font",
@@ -101,7 +118,8 @@ pub fn show(app: &mut SlideApp, ctx: &egui::Context) {
         ui.set_min_width(match d.id.as_str() {
             "themeColors" => 700.0,
             "themeFonts" => 400.0,
-            "figures" => 520.0,
+            "figures" => 480.0,
+            "cropSet" => 780.0,
             _ => 340.0,
         });
         if d.id == "themeColors" {
@@ -208,6 +226,7 @@ mod about;
 mod alt_text;
 mod body;
 mod columns;
+mod crop_set;
 mod date_time;
 mod equation;
 mod export;

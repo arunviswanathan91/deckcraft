@@ -144,6 +144,7 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("app.saveAsDialog", "Save As…", None, "{}"),
     ("app.exportDialog", "Export…", None, "{}"),
     ("app.figuresDialog", "Export Slides as Figures…", None, "{}"),
+    ("app.cropSetDialog", "Crop Set…", None, "{}"),
     ("app.browseThemeDialog", "Browse for Themes…", None, "{}"),
     ("app.compareDialog", "Compare…", None, "{}"),
     ("app.dialog", "Open Dialog", None, "{id}"),

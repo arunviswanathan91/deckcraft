@@ -1,9 +1,10 @@
 //! Export Slides as Figures: every slide becomes its own TIFF, PNG, JPEG, SVG or PDF at its own
-//! resolution, optionally cropped (publication figures). The work is `file.exportSlides`.
+//! resolution, optionally cropped (publication figures). The work is `file.exportSlides`, run one
+//! slide a frame so a progress bar can show. Crops and per-slide resolutions are set in Crop Set.
 
-use deckcraft_engine::cmd::figure::{self, MAX_DPI, MIN_DPI};
+use deckcraft_engine::cmd::figure::{self, MAX_DPI, MIN_DPI, Plan};
 
-use super::{Dialog, SlideApp, Tokens, Ui, Value, buttons, check, json, vec2};
+use super::{Dialog, SlideApp, Tokens, Ui, Value, buttons, check, json};
 
 const FORMATS: [(&str, &str); 5] = [
     ("tiff", "TIFF (.tif): lossless, for journals"),
@@ -13,36 +14,19 @@ const FORMATS: [(&str, &str); 5] = [
     ("svg", "SVG (.svg): the picture in a vector wrapper"),
 ];
 const DPI_PRESETS: [&str; 6] = ["72", "150", "300", "600", "1200", "2400"];
-/// The four crop fields of the dialog (`c`) and of a slide row (`c<i>`).
-const CROP_KEYS: [&str; 4] = ["l", "t", "w", "h"];
 
-/// Inches typed in a field; `None` when it is blank or not a number.
-fn inches(d: &Dialog, key: &str) -> Option<f64> {
-    d.fields.get(key).and_then(|t| t.trim().trim_end_matches(['"', ' ']).parse::<f64>().ok()).filter(|v| v.is_finite())
-}
-
-/// The crop in the fields `<prefix>l`…`<prefix>h` as `{x,y,width,height}` in points: `Ok(None)`
-/// when all four are blank, an error when only some are filled in or the size is not positive.
-fn crop_of(d: &Dialog, prefix: &str, what: &str) -> Result<Option<Value>, String> {
-    let v: Vec<Option<f64>> = CROP_KEYS.iter().map(|k| inches(d, &format!("{prefix}{k}"))).collect();
-    if v.iter().all(Option::is_none) {
-        return Ok(None);
-    }
-    let [Some(x), Some(y), Some(w), Some(h)] = v[..] else {
-        return Err(format!("{what}: fill in all of Left, Top, Width and Height, or clear them"));
-    };
-    if w <= 0.0 || h <= 0.0 {
-        return Err(format!("{what}: the width and height must be more than 0"));
-    }
-    Ok(Some(json!({"x": x * 72.0, "y": y * 72.0, "width": w * 72.0, "height": h * 72.0})))
-}
-
-fn dpi_of(d: &Dialog, key: &str, what: &str) -> Result<Option<f64>, String> {
-    let Some(t) = d.fields.get(key).map(|t| t.trim()).filter(|t| !t.is_empty()) else { return Ok(None) };
-    match t.parse::<f64>() {
-        Ok(v) if (MIN_DPI..=MAX_DPI).contains(&v) => Ok(Some(v)),
-        _ => Err(format!("{what}: resolution is {MIN_DPI} to {MAX_DPI} dpi")),
-    }
+/// An export under way: the figures still to write, one per frame.
+#[derive(Clone, Debug)]
+pub struct Job {
+    pub plans: Vec<Plan>,
+    pub params: Value,
+    /// The folder the figures go to (the desktop); `None` hands each to the browser as a download.
+    pub dir: Option<String>,
+    pub stem: String,
+    pub done: Vec<Value>,
+    /// The next frame writes the next figure (the frame before shows what is being worked on).
+    pub pending: bool,
+    pub failed: Option<String>,
 }
 
 /// The slides the dialog is set to export (0-based).
@@ -56,118 +40,47 @@ fn chosen_slides(d: &Dialog, count: usize, current: usize) -> Result<Vec<usize>,
     }
 }
 
-/// What the dialog asks for: the `file.exportSlides` params without `dir`, and per chosen slide the
-/// resolution and crop in its row (`slide.exportSettings` values, for saving them).
-pub(super) struct Request {
-    pub params: Value,
-    pub rows: Vec<(usize, Option<f64>, Option<Value>)>,
-}
-
-pub(super) fn request(d: &Dialog, count: usize, current: usize) -> Result<Request, String> {
+/// The `file.exportSlides` params (without `dir`) the dialog asks for. Each slide's own crop and
+/// resolution, saved by Crop Set, win over the default resolution here.
+pub(super) fn request(d: &Dialog, count: usize, current: usize) -> Result<Value, String> {
     let slides = chosen_slides(d, count, current)?;
     let preset = d.fields.get("fdpi").map_or("300", String::as_str);
-    let dpi = if preset == "custom" {
-        dpi_of(d, "fdpiCustom", "Resolution")?.ok_or("Resolution: enter a number")?
+    let dpi: f64 = if preset == "custom" {
+        let v = d.fields.get("fdpiCustom").and_then(|t| t.trim().parse::<f64>().ok()).filter(|v| (MIN_DPI..=MAX_DPI).contains(v));
+        v.ok_or_else(|| format!("Resolution: enter {MIN_DPI} to {MAX_DPI} dpi"))?
     } else {
         preset.parse().unwrap_or(300.0)
     };
-    let crop = if d.fields.get("fcrop").is_some_and(|v| v == "1") { crop_of(d, "c", "Crop")? } else { None };
-    let mut overrides = Vec::new();
-    let mut rows = Vec::new();
-    for &i in &slides {
-        let what = format!("Slide {}", i + 1);
-        let (row_dpi, row_crop) = (dpi_of(d, &format!("dpi{i}"), &what)?, crop_of(d, &format!("c{i}"), &what)?);
-        let mut o = json!({"slide": i});
-        if let Some(v) = row_dpi {
-            o["dpi"] = json!(v);
-        }
-        if let Some(c) = &row_crop {
-            o["crop"] = c.clone();
-        }
-        overrides.push(o);
-        rows.push((i, row_dpi, row_crop));
-    }
-    let mut params = json!({
+    Ok(json!({
         "format": d.fields.get("ffmt").map_or("tiff", String::as_str),
         "dpi": dpi,
         "slides": slides,
-        "useSlideSettings": false,
-        "overrides": overrides,
+        "useSlideSettings": true,
         "transparentBackground": d.fields.get("ftransparent").is_some_and(|v| v == "1"),
-    });
-    if let Some(c) = crop {
-        params["crop"] = c;
-    }
-    Ok(Request { params, rows })
+    }))
 }
 
-/// Rows start with what is saved on each slide.
-fn seed(app: &SlideApp, d: &mut Dialog) {
-    if d.fields.contains_key("seeded") {
+/// A dialog opened again from Crop Set gets back what it had.
+fn restore(d: &mut Dialog) {
+    if d.fields.contains_key("restored") {
         return;
     }
-    d.fields.insert("seeded".into(), "1".into());
-    let Some(doc) = app.session.active().map(|s| s.doc.clone()) else { return };
-    let show = |v: f64| format!("{}", (v / 72.0 * 1000.0).round() / 1000.0);
-    for (i, sl) in doc.slides.iter().enumerate() {
-        let s = figure::settings_of(sl);
-        if let Some(dpi) = s.dpi {
-            d.fields.insert(format!("dpi{i}"), format!("{dpi}"));
-        }
-        if let Some(c) = s.crop {
-            for (k, v) in CROP_KEYS.iter().zip([c.x0, c.y0, c.width(), c.height()]) {
-                d.fields.insert(format!("c{i}{k}"), show(v));
+    d.fields.insert("restored".into(), "1".into());
+    if let Some(f) = d.params.get("fields").and_then(Value::as_object) {
+        for (k, v) in f {
+            if let Some(v) = v.as_str() {
+                d.fields.insert(k.clone(), v.to_string());
             }
         }
     }
 }
 
-/// A sketch of the slide where dragging draws the crop rectangle (fields `cl`…`ch`, inches).
-fn crop_sketch(ui: &mut Ui, d: &mut Dialog, (sw, sh): (f64, f64)) {
-    let t = Tokens::get(ui.ctx());
-    let width = 240.0_f32;
-    let height = (f64::from(width) * sh / sw.max(1.0)) as f32;
-    let (resp, painter) = ui.allocate_painter(vec2(width, height.clamp(20.0, 200.0)), egui::Sense::click_and_drag());
-    let r = resp.rect;
-    painter.rect_filled(r, 2.0, egui::Color32::WHITE);
-    painter.rect_stroke(r, 2.0, egui::Stroke::new(1.0, t.text_dim), egui::StrokeKind::Inside);
-    let to_in = |p: egui::Pos2| {
-        (
-            (f64::from(p.x - r.left()) / f64::from(r.width()) * sw / 72.0).clamp(0.0, sw / 72.0),
-            (f64::from(p.y - r.top()) / f64::from(r.height()) * sh / 72.0).clamp(0.0, sh / 72.0),
-        )
-    };
-    let snap = |v: f64| (v * 100.0).round() / 100.0;
-    if resp.drag_started()
-        && let Some(p) = resp.interact_pointer_pos()
-    {
-        let (x, y) = to_in(p);
-        d.fields.insert("dragx".into(), x.to_string());
-        d.fields.insert("dragy".into(), y.to_string());
-    }
-    if resp.dragged()
-        && let (Some(p), Some(x0), Some(y0)) = (resp.interact_pointer_pos(), inches(d, "dragx"), inches(d, "dragy"))
-    {
-        let (x, y) = to_in(p);
-        for (k, v) in CROP_KEYS.iter().zip([x0.min(x), y0.min(y), (x - x0).abs(), (y - y0).abs()]) {
-            d.fields.insert(format!("c{k}"), snap(v).to_string());
-        }
-        d.fields.insert("fcrop".into(), "1".into());
-    }
-    if let Ok(Some(c)) = crop_of(d, "c", "Crop") {
-        let g = |k: &str| c.get(k).and_then(Value::as_f64).unwrap_or(0.0);
-        let to_px = |x: f64, y: f64| egui::pos2(r.left() + (x / sw) as f32 * r.width(), r.top() + (y / sh) as f32 * r.height());
-        let area = egui::Rect::from_two_pos(to_px(g("x"), g("y")), to_px(g("x") + g("width"), g("y") + g("height"))).intersect(r);
-        painter.rect_filled(area, 0.0, t.accent.gamma_multiply(0.3));
-        painter.rect_stroke(area, 0.0, egui::Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
-    }
-}
-
 pub(super) fn figures_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
-    seed(app, d);
-    let Some((count, current, size, title)) =
-        app.session.active().map(|s| (s.doc.slides.len(), s.selection.slide, (s.doc.slide_size.width, s.doc.slide_size.height), s.title()))
-    else {
+    restore(d);
+    if d.job.is_some() {
+        return progress(app, ui, d);
+    }
+    let Some((count, current, title)) = app.session.active().map(|s| (s.doc.slides.len(), s.selection.slide, s.title())) else {
         return true;
     };
     ui.label("Each chosen slide is written to its own file, at its own resolution.");
@@ -217,7 +130,7 @@ pub(super) fn figures_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) ->
             ui.add(egui::TextEdit::singleline(&mut v).desired_width(70.0));
             d.fields.insert("fdpiCustom".into(), v);
         }
-        ui.label(egui::RichText::new(format!("{MIN_DPI:.0}–{MAX_DPI:.0}")).color(Tokens::get(ui.ctx()).text_dim));
+        ui.label(egui::RichText::new(format!("{MIN_DPI:.0}–{MAX_DPI:.0}; for slides without their own")).color(Tokens::get(ui.ctx()).text_dim));
     });
     if matches!(fmt.as_str(), "png" | "tiff") {
         check(ui, d, "Transparent background", "ftransparent", false);
@@ -225,80 +138,46 @@ pub(super) fn figures_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) ->
 
     ui.add_space(4.0);
     ui.separator();
-    let cropping = check(ui, d, "Crop the slide and export only that area (drag on the sketch, or type inches)", "fcrop", false);
-    if cropping {
-        ui.horizontal(|ui| {
-            crop_sketch(ui, d, size);
-            ui.vertical(|ui| {
-                for (k, label) in CROP_KEYS.iter().zip(["Left", "Top", "Width", "Height"]) {
-                    ui.horizontal(|ui| {
-                        ui.add_sized(vec2(50.0, 20.0), egui::Label::new(label));
-                        let mut v = d.get(&format!("c{k}"), "");
-                        ui.add(egui::TextEdit::singleline(&mut v).desired_width(60.0));
-                        d.fields.insert(format!("c{k}"), v);
-                    });
-                }
-                ui.label(egui::RichText::new(format!("Slide: {:.2} × {:.2} in", size.0 / 72.0, size.1 / 72.0)).color(Tokens::get(ui.ctx()).text_dim));
-            });
-        });
+    let cropped = app.session.active().map_or(0, |s| s.doc.slides.iter().filter(|sl| figure::settings_of(sl).crop.is_some()).count());
+    let mut open_crop_set = false;
+    ui.horizontal(|ui| {
+        if ui.button("Crop Set…").on_hover_text("Choose the area and resolution of each slide").clicked() {
+            open_crop_set = true;
+        }
+        ui.label(egui::RichText::new(format!("{cropped} of {count} slides have a crop")).color(Tokens::get(ui.ctx()).text_dim));
+    });
+    if open_crop_set {
+        let mut c = Dialog::new("cropSet");
+        c.params = json!({"slide": current, "returnId": "figures", "returnParams": {"fields": d.fields}});
+        app.dialog = Some(c);
+        return true;
     }
 
+    // What will be written, slide by slide, or why not.
     let req = request(d, count, current);
-    if let Ok(r) = &req
-        && let Some(slides) = r.params.get("slides").and_then(Value::as_array)
-        && slides.len() > 1
-    {
-        ui.add_space(4.0);
-        ui.separator();
-        ui.label("Settings for each slide (blank: use the settings above). Crop is Left, Top, Width, Height in inches.");
-        egui::ScrollArea::vertical().max_height(150.0).id_salt("fig_rows").show(ui, |ui| {
-            for s in slides.iter().filter_map(Value::as_u64).map(|s| s as usize) {
-                ui.horizontal(|ui| {
-                    ui.add_sized(vec2(56.0, 20.0), egui::Label::new(format!("Slide {}", s + 1)));
-                    let mut v = d.get(&format!("dpi{s}"), "");
-                    ui.add(egui::TextEdit::singleline(&mut v).desired_width(48.0).hint_text("dpi"));
-                    d.fields.insert(format!("dpi{s}"), v);
-                    for k in CROP_KEYS {
-                        let mut v = d.get(&format!("c{s}{k}"), "");
-                        ui.add(egui::TextEdit::singleline(&mut v).desired_width(40.0).hint_text(k));
-                        d.fields.insert(format!("c{s}{k}"), v);
-                    }
-                });
-            }
-        });
-    } else if let Ok(r) = &req
-        && let Some(s) = r.params["slides"].get(0).and_then(Value::as_u64)
-    {
-        ui.add_space(4.0);
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label(format!("Slide {} only: set its own resolution and crop", s + 1));
-        });
-        ui.horizontal(|ui| {
-            let s = s as usize;
-            let mut v = d.get(&format!("dpi{s}"), "");
-            ui.add(egui::TextEdit::singleline(&mut v).desired_width(48.0).hint_text("dpi"));
-            d.fields.insert(format!("dpi{s}"), v);
-            for k in CROP_KEYS {
-                let mut v = d.get(&format!("c{s}{k}"), "");
-                ui.add(egui::TextEdit::singleline(&mut v).desired_width(40.0).hint_text(k));
-                d.fields.insert(format!("c{s}{k}"), v);
-            }
-        });
-    }
-    check(ui, d, "Remember these resolutions and crops with the slides", "fsave", true);
-
-    // What it will make, or why not.
     let plans = req.as_ref().map_err(Clone::clone).and_then(|r| {
         let doc = app.session.active().map(|s| s.doc.clone()).ok_or("no presentation")?;
-        figure::plan(&doc, current, &r.params).map_err(|e| e.to_string())
+        figure::plan(&doc, current, r).map_err(|e| e.to_string())
     });
     let t = Tokens::get(ui.ctx());
     match &plans {
-        Ok(p) => {
-            let sizes: Vec<String> = p.iter().take(3).map(|p| format!("slide {}: {} × {} px", p.slide + 1, p.width, p.height)).collect();
-            let more = if p.len() > 3 { format!(" … {} files", p.len()) } else { String::new() };
-            ui.label(egui::RichText::new(format!("{}{more}", sizes.join("; "))).color(t.text_dim));
+        Ok(list) => {
+            egui::ScrollArea::vertical().max_height(120.0).id_salt("fig_plan").show(ui, |ui| {
+                for p in list {
+                    let full = (p.region.width() - app_slide_width(app)).abs() < 0.01 && (p.region.height() - app_slide_height(app)).abs() < 0.01;
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Slide {}: {} × {} px at {:.0} dpi{}",
+                            p.slide + 1,
+                            p.width,
+                            p.height,
+                            p.dpi,
+                            if full { "" } else { ", cropped" }
+                        ))
+                        .color(t.text_dim),
+                    );
+                }
+            });
         }
         Err(e) => {
             ui.label(egui::RichText::new(e).color(t.text_dim));
@@ -306,69 +185,90 @@ pub(super) fn figures_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) ->
     }
     let (ok, cancel) = buttons(ui, "Export");
     if ok {
-        let (Ok(req), Ok(_)) = (req, plans) else {
+        let (Ok(params), Ok(plans)) = (req, plans) else {
             app.set_status("Fix the settings in the dialog first");
             return false;
         };
-        return export(app, d, &title, req) || cancel;
+        start(app, d, &title, params, plans);
+        return false;
     }
     cancel
 }
 
-/// Saves the row settings with the slides, then writes the figures. True when the dialog is done.
-fn export(app: &mut SlideApp, d: &Dialog, title: &str, req: Request) -> bool {
-    if d.fields.get("fsave").is_some_and(|v| v == "1") {
-        let saved: Vec<_> = app
-            .session
-            .active()
-            .map(|s| req.rows.iter().map(|(i, ..)| s.doc.slides.get(*i).map(|sl| figure::settings_of(sl))).collect())
-            .unwrap_or_default();
-        for ((i, dpi, crop), old) in req.rows.iter().zip(saved) {
-            let old = old.unwrap_or_default();
-            let same_crop = match (&crop, old.crop) {
-                (None, None) => true,
-                (Some(c), Some(o)) => {
-                    let g = |k: &str| c.get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);
-                    [g("x"), g("y"), g("width"), g("height")].iter().zip([o.x0, o.y0, o.width(), o.height()]).all(|(a, b)| (a - b).abs() < 1e-6)
-                }
-                _ => false,
-            };
-            if *dpi != old.dpi || !same_crop {
-                let _ = app.run("slide.exportSettings", json!({"slide": i, "dpi": dpi, "crop": crop}));
-            }
-        }
-    }
-    let Some(doc) = app.session.active().map(|s| s.doc.clone()) else { return true };
-    let current = app.session.active().map_or(0, |s| s.selection.slide);
-    let mut params = req.params;
+fn app_slide_width(app: &SlideApp) -> f64 {
+    app.session.active().map_or(0.0, |s| s.doc.slide_size.width)
+}
+
+fn app_slide_height(app: &SlideApp) -> f64 {
+    app.session.active().map_or(0.0, |s| s.doc.slide_size.height)
+}
+
+/// Asks where to put the files (the desktop) and starts the job the progress screen runs.
+fn start(app: &mut SlideApp, d: &mut Dialog, title: &str, params: Value, plans: Vec<Plan>) {
+    let (mut dir, mut stem) = (None, title.to_string());
     if let Some(pick) = app.services.pick_save.as_mut() {
         let ext = figure::Format::parse(params["format"].as_str().unwrap_or("tiff")).map_or("tif", figure::Format::extension);
-        let Some(path) = pick(&format!("{}.{ext}", figure::file_stem(title))) else { return false };
+        let Some(path) = pick(&format!("{}.{ext}", figure::file_stem(title))) else { return };
         let p = std::path::Path::new(&path);
-        let dir = p.parent().map(|x| x.to_string_lossy().to_string()).filter(|x| !x.is_empty()).unwrap_or_else(|| ".".into());
-        params["dir"] = json!(dir);
-        params["name"] = json!(p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| title.to_string()));
-        return match app.run("file.exportSlides", params) {
-            Ok(r) => {
-                let n = r["files"].as_array().map_or(0, Vec::len);
-                app.set_status(format!("Exported {n} figure{} to {dir}", if n == 1 { "" } else { "s" }));
-                true
-            }
-            Err(_) => false,
-        };
+        dir = Some(p.parent().map(|x| x.to_string_lossy().to_string()).filter(|x| !x.is_empty()).unwrap_or_else(|| ".".into()));
+        stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or(stem);
     }
-    // The web: one download per slide.
-    let plans = match figure::plan(&doc, current, &params) {
-        Ok(p) => p,
-        Err(e) => {
-            app.set_status(e.to_string());
-            return false;
+    d.job = Some(Job { plans, params, dir, stem, done: Vec::new(), pending: false, failed: None });
+}
+
+/// The progress screen: which slide is being drawn and how many are done. True when finished.
+fn progress(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let Some(job) = d.job.as_mut() else { return true };
+    let (done, total) = (job.done.len(), job.plans.len());
+    if let Some(e) = &job.failed {
+        ui.label(egui::RichText::new(format!("The export stopped: {e}")).color(t.text));
+        ui.label(egui::RichText::new(format!("{done} of {total} figures were written.")).color(t.text_dim));
+        let (_, close) = buttons(ui, "Close");
+        return close;
+    }
+    if done == total {
+        let n = total;
+        app.set_status(match &job.dir {
+            Some(dir) => format!("Exported {n} figure{} to {dir}", if n == 1 { "" } else { "s" }),
+            None => format!("Exported {n} figure{}", if n == 1 { "" } else { "s" }),
+        });
+        return true;
+    }
+    let next = job.plans.get(done).map(|p| p.slide + 1).unwrap_or(0);
+    ui.label(format!("Exporting slide {next} ({} of {total})…", done + 1));
+    ui.add_space(4.0);
+    ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).desired_width(420.0).show_percentage());
+    ui.label(egui::RichText::new("Large figures take a few seconds each.").color(t.text_dim));
+    let (_, cancel) = buttons(ui, "Cancel export");
+    if cancel {
+        app.set_status(format!("Export cancelled: {done} of {total} figures were written"));
+        return true;
+    }
+    ui.ctx().request_repaint();
+    if !job.pending {
+        job.pending = true;
+        return false;
+    }
+    job.pending = false;
+    let Some(doc) = app.session.active().map(|s| s.doc.clone()) else { return true };
+    let Some(plan) = job.plans.get(done).cloned() else { return true };
+    let result = match &job.dir {
+        Some(dir) => figure::write_figure(&doc, &plan, &job.params, dir, &job.stem).map_err(|e| e.to_string()),
+        None => {
+            let bytes = figure::render_figure(&doc, &plan, &job.params);
+            let name = figure::figure_name(&job.stem, doc.slides.len(), &plan);
+            if app.download_file(&name, bytes) {
+                Ok(json!({"slide": plan.slide}))
+            } else {
+                Err("the browser did not accept the download".to_string())
+            }
         }
     };
-    let mut any = false;
-    for pl in &plans {
-        let bytes = figure::render_figure(&doc, pl, &params);
-        any = app.download_file(&figure::figure_name(title, doc.slides.len(), pl), bytes) || any;
+    match (result, d.job.as_mut()) {
+        (Ok(v), Some(job)) => job.done.push(v),
+        (Err(e), Some(job)) => job.failed = Some(e),
+        _ => {}
     }
-    any
+    false
 }

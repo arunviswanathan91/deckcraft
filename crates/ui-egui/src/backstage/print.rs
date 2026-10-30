@@ -348,9 +348,14 @@ pub(super) fn export(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage) {
                         ],
                     );
                     ui.add_space(10.0);
-                    if square_button(ui, Icon::Export, "Export Slides as Figures…", true).clicked() {
-                        let _ = app.run("app.figuresDialog", json!({}));
-                    }
+                    ui.horizontal(|ui| {
+                        if square_button(ui, Icon::Export, "Export Slides as Figures…", true).clicked() {
+                            let _ = app.run("app.figuresDialog", json!({}));
+                        }
+                        if square_button(ui, Icon::Export, "Crop Set…", true).clicked() {
+                            let _ = app.run("app.cropSetDialog", json!({}));
+                        }
+                    });
                 }
                 ExportTask::FileType => {
                     ui.label(RichText::new("Change File Type").font(theme::font(16.0)).color(t.text));

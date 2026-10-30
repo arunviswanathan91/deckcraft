@@ -171,6 +171,7 @@ pub fn menu_tree() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
                 ("Save As…", "app.saveAsDialog"),
                 ("Export…", "app.exportDialog"),
                 ("Export Slides as Figures…", "app.figuresDialog"),
+                ("Crop Set…", "app.cropSetDialog"),
                 ("Print…", "app.print"),
                 ("-", ""),
                 ("Properties", "file.properties"),

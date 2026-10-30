@@ -16,6 +16,7 @@ use crate::SlideApp;
 use crate::theme::{self, Tokens};
 
 mod context_menu;
+mod crop_frame;
 mod guides;
 mod ime;
 mod input;
@@ -25,6 +26,7 @@ mod rulers;
 mod scroll;
 
 use context_menu::context_menu;
+use crop_frame::draw_crop_frame;
 use guides::{draw_grid, draw_guides, grid_line_step};
 pub use ime::ime_area;
 use ime::ime_output;
@@ -330,6 +332,7 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     if app.ui.guides {
         draw_guides(app, &painter, xf, slide_rect, &t);
     }
+    draw_crop_frame(app, &painter, xf, slide_rect, &t);
     if app.ui.ruler {
         ruler(&painter, avail, slide_rect, scale, app.session.prefs.units, &t);
         ruler_markers(app, ui, &painter, avail, xf, &t);

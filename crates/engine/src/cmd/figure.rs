@@ -33,7 +33,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Slide Export Settings",
             [],
             None,
-            "{slide?: index, dpi?: 72-4800 or null, crop?: {x, y, width, height} in slide points or null, format?: png|jpeg|tiff|svg|pdf or null} (null clears; absent keeps) → settings: the resolution, crop and format this slide is exported with, saved with the slide",
+            "{slide?: index, dpi?: 72-4800 or null, crop?: {x, y, width, height} in slide points or null, format?: png|jpeg|tiff|svg|pdf or null} or {settings: [{slide, dpi?, crop?, format?}]} for several slides in one undo step (null clears; absent keeps) → settings: the resolution, crop and format this slide is exported with, saved with the slide",
             has_doc,
             set_settings
         ),
@@ -180,41 +180,77 @@ fn get_settings(s: &mut Session, _p: &Value) -> Result<Value> {
     Ok(json!({"slides": list, "slideWidth": doc.slide_size.width, "slideHeight": doc.slide_size.height}))
 }
 
-fn set_settings(s: &mut Session, p: &Value) -> Result<Value> {
-    const C: &str = "slide.exportSettings";
-    let index = match opt_usize_param(p, "slide", C)? {
-        Some(i) => i,
-        None => s.doc()?.selection.slide,
-    };
-    // Parsed before the edit, so a bad value changes nothing.
+/// One slide's new settings: for each of dpi, crop and format, `None` keeps it, `Some(None)`
+/// clears it and `Some(Some(v))` sets it.
+struct Change {
+    slide: usize,
+    dpi: Option<Option<f64>>,
+    crop: Option<Option<Rect>>,
+    format: Option<Option<Format>>,
+}
+
+fn change_of(p: &Value, slide: usize, c: &str) -> Result<Change> {
     let dpi = match p.get("dpi") {
         None => None,
         Some(Value::Null) => Some(None),
-        Some(v) => Some(Some(check_dpi(v.as_f64().unwrap_or(f64::NAN), C)?)),
+        Some(v) => Some(Some(check_dpi(v.as_f64().unwrap_or(f64::NAN), c)?)),
     };
     let crop = match p.get("crop") {
         None => None,
         Some(Value::Null) => Some(None),
-        Some(v) => Some(Some(rect_param(v, C)?)),
+        Some(v) => Some(Some(rect_param(v, c)?)),
     };
     let format = match p.get("format") {
         None => None,
         Some(Value::Null) => Some(None),
-        Some(v) => Some(Some(v.as_str().and_then(Format::parse).ok_or_else(|| bad(C, "format is one of png, jpeg, tiff, svg, pdf"))?)),
+        Some(v) => Some(Some(v.as_str().and_then(Format::parse).ok_or_else(|| bad(c, "format is one of png, jpeg, tiff, svg, pdf"))?)),
     };
+    Ok(Change { slide, dpi, crop, format })
+}
+
+fn set_settings(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "slide.exportSettings";
+    // Parsed before the edit, so a bad value changes nothing.
+    let changes: Vec<Change> = match p.get("settings") {
+        Some(Value::Array(list)) => list
+            .iter()
+            .map(|e| {
+                let i = opt_usize_param(e, "slide", C)?.ok_or_else(|| bad(C, "each entry of `settings` needs a `slide`"))?;
+                change_of(e, i, C)
+            })
+            .collect::<Result<_>>()?,
+        Some(_) => return Err(bad(C, "`settings` is a list of {slide, dpi?, crop?, format?}")),
+        None => {
+            let index = match opt_usize_param(p, "slide", C)? {
+                Some(i) => i,
+                None => s.doc()?.selection.slide,
+            };
+            vec![change_of(p, index, C)?]
+        }
+    };
+    if changes.len() > MAX_FIGURES * 2 {
+        return Err(bad(C, "too many slides"));
+    }
     s.edit(|doc, _| {
-        let slide = doc.slides.get_mut(index).ok_or_else(|| bad(C, format!("no slide {index}")))?;
-        let slide = Arc::make_mut(slide);
-        if let Some(d) = dpi {
-            put_tag(slide, TAG_DPI, d.map(|d| d.to_string()));
+        if let Some(c) = changes.iter().find(|c| c.slide >= doc.slides.len()) {
+            return Err(bad(C, format!("no slide {}", c.slide)));
         }
-        if let Some(c) = crop {
-            put_tag(slide, TAG_CROP, c.map(crop_text));
+        let mut out = Vec::new();
+        for c in &changes {
+            let Some(slot) = doc.slides.get_mut(c.slide) else { continue };
+            let slide = Arc::make_mut(slot);
+            if let Some(d) = c.dpi {
+                put_tag(slide, TAG_DPI, d.map(|d| d.to_string()));
+            }
+            if let Some(r) = c.crop {
+                put_tag(slide, TAG_CROP, r.map(crop_text));
+            }
+            if let Some(f) = c.format {
+                put_tag(slide, TAG_FORMAT, f.map(|f| f.id().to_string()));
+            }
+            out.push(settings_json(c.slide, &settings_of(slide)));
         }
-        if let Some(f) = format {
-            put_tag(slide, TAG_FORMAT, f.map(|f| f.id().to_string()));
-        }
-        Ok(settings_json(index, &settings_of(slide)))
+        Ok(if out.len() == 1 && p.get("settings").is_none() { out.remove(0) } else { Value::Array(out) })
     })
 }
 
@@ -364,6 +400,17 @@ pub fn render_figure(doc: &Presentation, pl: &Plan, p: &Value) -> Result<Vec<u8>
     if bytes.is_empty() { Err(fail()) } else { Ok(bytes) }
 }
 
+/// Draws one planned figure and writes it into `dir`; what `file.exportSlides` reports for it.
+/// The UI calls this one slide at a time to show progress.
+pub fn write_figure(doc: &Presentation, pl: &Plan, p: &Value, dir: &str, stem: &str) -> Result<Value> {
+    let bytes = render_figure(doc, pl, p)?;
+    let path = format!("{}/{}", dir.trim_end_matches(['/', '\\']), figure_name(stem, doc.slides.len(), pl));
+    crate::io::write_file(&path, &bytes).map_err(EngineError::Other)?;
+    Ok(
+        json!({"slide": pl.slide, "path": path, "format": pl.format.id(), "dpi": pl.dpi, "width": pl.width, "height": pl.height, "bytes": bytes.len()}),
+    )
+}
+
 fn export_slides(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "file.exportSlides";
     let dir = str_param(p, "dir").ok_or_else(|| bad(C, "missing `dir`"))?.trim_end_matches(['/', '\\']).to_string();
@@ -375,11 +422,9 @@ fn export_slides(s: &mut Session, p: &Value) -> Result<Value> {
     let stem = str_param(p, "name").map(String::from).unwrap_or_else(|| st.title());
     let mut files = Vec::new();
     for (k, pl) in plans.iter().enumerate() {
-        let bytes = render_figure(&st.doc, pl, p)?;
-        let path = format!("{dir}/{}", figure_name(&stem, st.doc.slides.len(), pl));
-        crate::io::write_file(&path, &bytes)
-            .map_err(|e| EngineError::Other(if k == 0 { e } else { format!("{e} ({k} of {} figures were written)", plans.len()) }))?;
-        files.push(json!({"slide": pl.slide, "path": path, "format": pl.format.id(), "dpi": pl.dpi, "width": pl.width, "height": pl.height, "bytes": bytes.len()}));
+        let one = write_figure(&st.doc, pl, p, &dir, &stem)
+            .map_err(|e| if k == 0 { e } else { EngineError::Other(format!("{e} ({k} of {} figures were written)", plans.len())) })?;
+        files.push(one);
     }
     Ok(json!({"files": files}))
 }
@@ -495,6 +540,20 @@ mod tests {
         assert_eq!(settings_of(&s.doc().unwrap().doc.slides[1]), SlideSettings::default());
         s.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(settings_of(&s.doc().unwrap().doc.slides[1]).dpi, Some(1200.0));
+    }
+
+    #[test]
+    fn several_slides_are_saved_in_one_undo_step() {
+        let mut s = deck(3);
+        let crop = json!({"x": 0, "y": 0, "width": 100, "height": 50});
+        s.execute("slide.exportSettings", &json!({"settings": [{"slide": 0, "crop": crop, "dpi": 600}, {"slide": 2, "dpi": 1200}]})).unwrap();
+        let g = |s: &mut Session, i: usize| settings_of(&s.doc().unwrap().doc.slides[i]);
+        assert_eq!((g(&mut s, 0).dpi, g(&mut s, 2).dpi), (Some(600.0), Some(1200.0)));
+        assert!(g(&mut s, 0).crop.is_some() && g(&mut s, 1).crop.is_none());
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!((g(&mut s, 0), g(&mut s, 2)), (Default::default(), Default::default()), "one undo reverts all");
+        assert!(s.execute("slide.exportSettings", &json!({"settings": [{"slide": 0, "dpi": 300}, {"slide": 9, "dpi": 300}]})).is_err());
+        assert_eq!(g(&mut s, 0).dpi, None, "a bad entry changes nothing");
     }
 
     #[test]

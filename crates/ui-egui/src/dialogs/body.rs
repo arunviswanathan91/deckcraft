@@ -45,6 +45,7 @@ pub(super) fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
         "tabs" => tabs_dialog(app, ui, d),
         "export" => dlg_export(app, ui, d),
         "figures" => super::figures::figures_dialog(app, ui, d),
+        "cropSet" => super::crop_set::crop_set_dialog(app, ui, d),
         "replaceFonts" => dlg_replace_fonts(app, ui, d),
         "symbol" => dlg_symbol(app, ui, d),
         "equation" => dlg_equation(app, ui, d),
